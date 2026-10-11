@@ -1,0 +1,39 @@
+1. There are two calls to __syncthreads() in wmma_shared(). Why is each needed?
+
+Ans.
+The first __syncthreads() runs after the block has stored the current A and B panels into shared memory and before tile_mma(). 
+Threads in the block split those stores, so each thread writes only part of a_tile and b_tile. 
+The barrier makes every warp wait until all of those writes are visible before any warp reads the panels. 
+Without it, tile_mma() could multiply using elements that another thread has not written yet.
+
+The second __syncthreads() runs after tile_mma() and before the next step along K. That next step overwrites the same shared arrays. 
+The barrier makes every warp finish reading the current panels before any thread starts the next stores. 
+Without it, a warp still inside tile_mma() could see a panel that another thread has already partly overwritten.
+
+2. How many bytes of input data does one block in wmma_simple() request from global memory over the full reduction dimension K? In our case, one block comprises 2 x 2 warps. Report answer in kB.
+
+Ans.
+2048 kB.
+
+K is 4096 and each WMMA step covers 8 elements of K, so there are 512 steps. 
+At every step, one warp loads an A tile of 16 x 8 and a B tile of 8 x 16 directly from global memory:
+
+(16 * 8 + 8 * 16) * 4 bytes = 1024 bytes.
+
+A block has 2 x 2 = 4 warps, and each warp issues its own loads. Repeated loads count separately, so one step requests 4 * 1024 = 4096 bytes. 
+Over the full K dimension that is
+
+4096 * 512 = 2,097,152 bytes = 2048 kB.
+
+3. How many bytes of input data does one block in wmma_shared() request from global memory over the full reduction dimension K? In our case, one block comprises 2 x 2 warps. Report answer in kB.
+
+Ans.
+1024 kB.
+
+Again there are 512 steps along K. At every step the block loads one A panel of 32 x 8 and one B panel of 8 x 32 from global memory, once:
+
+(32 * 8 + 8 * 32) * 4 bytes = 2048 bytes.
+
+The four warps then reuse those panels from shared memory, so their later reads are not extra global requests. Over the full K dimension that is
+
+2048 * 512 = 1,048,576 bytes = 1024 kB.
