@@ -13,7 +13,24 @@ using namespace nvcuda;
 // For our (64, 2) block dimensions, each block has 2 x 2 grid of warps
 // Each warp computes 16 x 16 output tile
 __global__ void wmma_simple(const float *a, const float *b, float *c, int M, int N, int K) {
-  //TODO: complete this kernel
+  Accumulator acc;
+  zero(&acc);
+
+  // This warp's 16 x 16 output tile inside the block's 32 x 32 tile
+  int warp_row = threadIdx.y;
+  int warp_col = threadIdx.x / warpSize;
+  int c_row = blockIdx.y * 2 * WMMA_M + warp_row * WMMA_M;
+  int c_col = blockIdx.x * 2 * WMMA_N + warp_col * WMMA_N;
+
+  // Each step multiplies A[16, 8] by B[8, 16] straight from global memory
+  for (int k = 0; k < K; k += WMMA_K) {
+    const float *a_tile_ptr = a + c_row * K + k;
+    const float *b_tile_ptr = b + k * N + c_col;
+    tile_mma(&acc, a_tile_ptr, K, b_tile_ptr, N);
+  }
+
+  float *c_tile_ptr = c + c_row * N + c_col;
+  store_tile(c_tile_ptr, N, &acc);
 }
 
 void launch_wmma_simple(int M, int N, int K, const float *a_d, const float *b_d, float *c_d) {
@@ -69,8 +86,8 @@ __global__ void wmma_shared(const float *a, const float *b, float *c, int M, int
         int row = idx / WMMA_K;
         int col = idx % WMMA_K;
 
-        // TODO: Fill global memory source address for matrix a
-        // a_tile[row][col] = a[?]; 
+        // Block's 32 x 8 A panel: rows [block_row, block_row + 32), cols [k, k + 8)
+        a_tile[row][col] = a[(block_row + row) * K + (k + col)];
       }
 
       //Each B half is reused by two warp rows
@@ -78,14 +95,15 @@ __global__ void wmma_shared(const float *a, const float *b, float *c, int M, int
         int row = idx / (2 * WMMA_N);
         int col = idx % (2 * WMMA_N);
 
-        // TODO: Fill global memory source address for matrix b
-        // b_tile[row][col] = b[?]; 
+        // Block's 8 x 32 B panel: rows [k, k + 8), cols [block_col, block_col + 32)
+        b_tile[row][col] = b[(k + row) * N + (block_col + col)];
       }
  
       __syncthreads();
-      // TODO: Supply arguments to tile_mma()
-      // Hint: Shared-memory tile pointers and leading dimensions
-      // tile_mma(?);
+      // This warp consumes a 16 x 8 slice of A and an 8 x 16 slice of B
+      tile_mma(&acc,
+               &a_tile[warp_row * WMMA_M][0], WMMA_K,
+               &b_tile[0][warp_col * WMMA_N], 2 * WMMA_N);
       __syncthreads();
   }
 
